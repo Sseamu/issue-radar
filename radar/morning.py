@@ -28,8 +28,13 @@ NO_END_FLAG = config.ROOT / "NO_SHUTDOWN"          # 이 파일이 있으면 절
 
 MAX_MINUTES = float(config.env("MORNING_MAX_MINUTES", "65"))   # 전체 작업 시간 예산 (06:00~07:05)
 EST_ANALYZE_MIN = float(config.env("EST_ANALYZE_MIN", "3"))    # 키워드 분석 1건 예상 소요 (실측 약 2분)
-BRIEF_AT = config.env("BRIEF_AT", "07:00")                     # 브리핑 전송 시각 (비우면 부팅 직후 전송)
+BRIEF_AT = config.env("BRIEF_AT", "")                          # 비우면: 준비되는 즉시 전송 (기본) / "07:00" 처럼 적으면 그 시각에 전송
 BRIEF_LEAD_MIN = float(config.env("BRIEF_LEAD_MIN", "5"))      # 브리핑 생성에 걸리는 시간 (실측 약 2분)
+# 1: 할 일이 끝나는 대로 브리핑을 만들어 Slack '예약 전송'(BRIEF_AT)으로 걸어 두고 PC는 바로 종료
+# 0: 전송 직전(BRIEF_AT - BRIEF_LEAD_MIN)까지 기다렸다가 최신 뉴스로 만들어 정각에 직접 전송
+BRIEF_SCHEDULE = config.env("BRIEF_SCHEDULE", "1") == "1"
+# 이 시각 이전에 켜진 실행(예: 자정에 PC를 켠 경우)은 브리핑·관심 키워드를 건너뛰고 아침 실행에 맡긴다
+BRIEF_EARLIEST = config.env("BRIEF_EARLIEST", "05:00")
 END_ACTION = config.env("END_ACTION", "shutdown")              # shutdown | sleep | none
 WAKE_WINDOW = config.env("WAKE_WINDOW", "05:30-06:40")           # 이 시간대에 시작했을 때만 자동 종료
 SCAN_DAYS = int(config.env("SCAN_DAYS", "7"))                   # 밀린 요청을 찾아볼 기간
@@ -232,8 +237,10 @@ def run_watch(client, deadline: float, now: datetime) -> list[dict]:
             continue
         try:
             head = client.chat_postMessage(channel=config.SLACK_ALERT_CHANNEL,
-                                           text=f"*[관심 키워드 분석] {r['q']}* · {reason}")
-            handlers.run_analyze(client, head["channel"], head["ts"], r["q"], r.get("en", ""))
+                                           text=f"*[관심 키워드 분석] {r['label']}* · {reason} · 최근 이슈는 {watch.WATCH_DAYS}일 기준")
+            handlers.run_analyze(client, head["channel"], head["ts"], r["key"], r.get("en", ""),
+                                 ko_query=r.get("ko_query"), foreign_sites=r.get("sites"),
+                                 recent_days=watch.WATCH_DAYS)
             r["full"] = reason
         except Exception as e:
             log.exception("관심 키워드 전체 분석 실패: %s", r["q"])
@@ -307,7 +314,8 @@ def main():
             return
 
         today = started.date().isoformat()
-        want_brief = config.env("BRIEF_LOCAL", "1") == "1" and db.kv_get("brief_date") != today
+        want_brief = (config.env("BRIEF_LOCAL", "1") == "1" and db.kv_get("brief_date") != today
+                      and started.strftime("%H:%M") >= BRIEF_EARLIEST)
         brief_at = _brief_time(started) if want_brief else None
         # 브리핑 생성 시작 시각 = 전송 시각 - 생성 소요 시간. 그 전까지 밀린 요청을 처리한다
         queue_deadline = deadline
@@ -324,24 +332,40 @@ def main():
         if watch_results:
             summary.append(f"관심 키워드 {len(watch_results)}개")
 
-        # 3) 밀린 요청 처리 (브리핑 생성 전까지)
-        done, left = process_queue(client, bot_uid, queue_deadline)
-        summary.append(f"요청 처리 {done}건" + (f" · 이월 {left}건" if left else ""))
-
-        # 4) 아침 브리핑: 전송 시각 직전에 최신 뉴스로 만들고, 정각에 전송 (관심 키워드 섹션 포함)
-        if want_brief:
+        def send_brief():
+            """브리핑 생성·전송. BRIEF_AT 이 없으면 즉시, 있으면 예약 전송(또는 대기 후 전송)."""
             try:
-                _sleep_until(brief_at.timestamp() - BRIEF_LEAD_MIN * 60, "브리핑 생성")
+                if brief_at and not BRIEF_SCHEDULE:
+                    _sleep_until(brief_at.timestamp() - BRIEF_LEAD_MIN * 60, "브리핑 생성")
                 blocks, title = daily.to_blocks(daily.build_brief(_sections()))
                 blocks = blocks[:-1] + watch.blocks(watch_results) + blocks[-1:]   # 하단 요약줄 앞에 삽입
-                _sleep_until(brief_at.timestamp(), "브리핑 전송")
-                client.chat_postMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=title,
-                                        unfurl_links=False)
+                if brief_at and BRIEF_SCHEDULE and brief_at.timestamp() - time.time() > 90:
+                    # Slack 예약 전송: PC가 꺼져도 Slack 서버가 BRIEF_AT 에 보낸다
+                    client.chat_scheduleMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=title,
+                                                post_at=int(brief_at.timestamp()), unfurl_links=False)
+                    summary.append(f"브리핑 {datetime.now():%H:%M} 생성 → {brief_at:%H:%M} 예약 전송")
+                else:
+                    if brief_at:
+                        _sleep_until(brief_at.timestamp(), "브리핑 전송")
+                    client.chat_postMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=title,
+                                            unfurl_links=False)
+                    summary.append(f"브리핑 전송 {datetime.now():%H:%M}")
                 db.kv_set("brief_date", today)
-                summary.append(f"브리핑 전송 {datetime.now():%H:%M}")
             except Exception as e:
                 log.exception("브리핑 실패")
                 summary.append(f"브리핑 실패({type(e).__name__})")
+
+        # 3) 즉시 전송 모드(BRIEF_AT 비움): 브리핑을 먼저 보내고 나서 밀린 요청 처리
+        if want_brief and not brief_at:
+            send_brief()
+
+        # 4) 밀린 요청 처리
+        done, left = process_queue(client, bot_uid, queue_deadline)
+        summary.append(f"요청 처리 {done}건" + (f" · 이월 {left}건" if left else ""))
+
+        # 5) 시각 지정 모드: 요청 처리 후 브리핑 (예약 전송 또는 대기 후 전송)
+        if want_brief and brief_at:
+            send_brief()
     except Exception:
         log.exception("아침 배치 오류")
         summary.append("오류 발생(morning.log 확인)")

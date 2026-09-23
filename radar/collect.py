@@ -79,11 +79,13 @@ def _slices(months: int, slice_days: int):
         cur = nxt
 
 
-def collect_google(query: str, months: int = 12, foreign_query: str = "", progress=None) -> dict:
-    """국내(한국어) + 해외 메이저(영문 키워드가 있을 때) 수집."""
-    jobs = [("ko", query, "google_ko")]
+def collect_google(query: str, months: int = 12, foreign_query: str = "", progress=None,
+                   ko_query: str | None = None, foreign_sites: list[str] | None = None) -> dict:
+    """국내(한국어) + 해외 메이저(영문 키워드가 있을 때) 수집.
+    query 는 DB 저장 키, ko_query 가 있으면 한국어 검색에는 그 검색식을 쓴다 (예: 해외 바이오 중심 검색)."""
+    jobs = [("ko", ko_query or query, "google_ko")]
     if foreign_query:
-        sites = " OR ".join(f"site:{s}" for s in config.FOREIGN_SITES)
+        sites = " OR ".join(f"site:{s}" for s in (foreign_sites or config.FOREIGN_SITES))
         jobs.append(("en", f"{foreign_query} ({sites})", "google_foreign"))
 
     slices = list(_slices(months, config.SLICE_DAYS))

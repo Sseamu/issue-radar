@@ -61,13 +61,13 @@ def parse_intent(text: str, in_thread_query: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------- 분석 단계 (각 단계 결과를 Slack 텍스트로 반환)
-def step_collect(query: str, en: str) -> str:
+def step_collect(query: str, en: str, ko_query: str | None = None, foreign_sites: list[str] | None = None) -> str:
     prev = db.latest_report(query, "collect")
     fresh = prev and datetime.fromisoformat(prev["_created_at"]) > datetime.now() - timedelta(hours=20)
     if fresh:
         return f"_최근 20시간 내 수집 이력이 있어 기존 데이터를 사용합니다._"
     months = 1 if prev else config.ANALYZE_MONTHS  # 이미 수집 이력이 있으면 최근 1개월만 추가
-    stats = collect.collect_google(query, months, en)
+    stats = collect.collect_google(query, months, en, ko_query=ko_query, foreign_sites=foreign_sites)
     stats |= collect.collect_naver(query)
     db.save_report(query, "collect", stats)
     n = len(db.load_articles(query, include_dups=True))

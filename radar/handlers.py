@@ -13,10 +13,10 @@ def say_thread(client, channel, thread_ts, text):
                             blocks=md_blocks(text), unfurl_links=False)
 
 
-def run_analyze(client, channel, ts, query, en):
+def run_analyze(client, channel, ts, query, en, ko_query=None, foreign_sites=None, recent_days=7):
     db.save_thread(ts, channel, query)
-    say_thread(client, channel, ts, agent.step_collect(query, en))
-    say_thread(client, channel, ts, agent.step_recent(query))
+    say_thread(client, channel, ts, agent.step_collect(query, en, ko_query, foreign_sites))
+    say_thread(client, channel, ts, agent.step_recent(query, recent_days))
     text, res, brief = agent.step_topics(query)
     say_thread(client, channel, ts, text)
     say_thread(client, channel, ts, agent.step_forecast(query, res, brief))

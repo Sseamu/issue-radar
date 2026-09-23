@@ -66,6 +66,8 @@ def find_pending(client, bot_uid: str) -> list[dict]:
     out = []
     chans = client.users_conversations(types="public_channel,private_channel", exclude_archived=True,
                                        limit=200)["channels"]
+    diag = {"too_new": 0, "handled": 0, "pc_only": 0, "mentions": 0}
+    _log(f"봇이 들어가 있는 채널 {len(chans)}개: " + ", ".join("#" + c.get("name", c["id"]) for c in chans))
     for ch in chans:
         hist = client.conversations_history(channel=ch["id"], oldest=oldest, limit=200)["messages"]
         for m in hist:
@@ -76,14 +78,27 @@ def find_pending(client, bot_uid: str) -> list[dict]:
             for x, parent in cands:
                 if x.get("bot_id") or x.get("user") == bot_uid or tag not in x.get("text", ""):
                     continue
-                if now - float(x["ts"]) < MIN_AGE_MIN * 60 or _bot_reacted(x, bot_uid):
+                diag["mentions"] += 1
+                if now - float(x["ts"]) < MIN_AGE_MIN * 60:
+                    diag["too_new"] += 1
+                    continue
+                if _bot_reacted(x, bot_uid):
+                    diag["handled"] += 1
                     continue
                 text = re.sub(r"<@[A-Z0-9]+>", "", x["text"]).strip()
                 if not text or PC_ONLY.match(text):
+                    diag["pc_only"] += 1
                     continue
                 out.append(dict(channel=ch["id"], ts=x["ts"], thread_ts=parent["ts"] if parent else None,
                                 text=text, parent=re.sub(r"<@[A-Z0-9]+>", "", parent["text"]).strip() if parent else ""))
+    _log(f"최근 {LOOKBACK_H:g}시간 @radar 멘션 {diag['mentions']}건 → 대상 {len(out)}건 "
+         f"(작성 {MIN_AGE_MIN:g}분 미만 {diag['too_new']} · 이미 처리됨 {diag['handled']} · PC 전용 명령 {diag['pc_only']})")
     return sorted(out, key=lambda x: float(x["ts"]))[:MAX_PER_RUN]
+
+
+def _log(msg: str):
+    import sys
+    print(msg, file=sys.stderr)   # --count 출력(표준출력)을 오염시키지 않도록 stderr 로
 
 
 # ---------------------------------------------------------------- LLM + 웹 검색

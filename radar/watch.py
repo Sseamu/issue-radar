@@ -1,6 +1,6 @@
 """관심 키워드: 요청하지 않아도 매일 아침 자동으로 챙겨 보는 키워드.
 
-매일   : 지난 24시간 기사 수 + 평소 대비 배율 + 핵심 2~3줄 → 아침 브리핑 하단에 표시
+매일   : 최근 2일(WATCH_DAYS) 기사 수 + 평소 대비 배율 + 핵심 2~3줄 → 아침 브리핑 하단에 표시
 정기   : 처음 등록한 다음 날 아침, 매주 월요일, 보도량 급증일에는 전체 분석(쟁점·예측)을 #radar 에 게시
 
 목록은 DB에 저장되며 Slack에서 관리한다:
@@ -23,7 +23,34 @@ from .llm import chat_json
 SPIKE_RATIO = float(config.env("WATCH_SPIKE_RATIO", "2.0"))     # 평소 대비 이 배율 이상이면 급증
 FULL_WEEKDAY = config.env("WATCH_FULL_WEEKDAY", "0")            # 정기 전체 분석 요일 (0=월 … 6=일, 비우면 안 함)
 WATCH_MAX = int(config.env("WATCH_MAX", "10"))                  # 최대 등록 개수
+WATCH_DAYS = int(config.env("WATCH_DAYS", "2"))                 # 동향·최근 이슈를 볼 기간(일)
 MIN_BASE_DAYS = 3                                               # 평소 수준 계산에 필요한 최소 일수
+
+# 키워드별 세부 설정. 이름이 같으면 자동 적용 (Slack 에서 '관심 추가 바이오' 해도 적용됨)
+#   key      : DB 저장 이름 (검색 방향이 달라지면 기존 데이터와 섞이지 않게 새 이름 사용)
+#   label    : Slack 표시 이름
+#   ko_query : 한국어 검색식 (없으면 키워드 그대로)
+#   en       : 해외 검색식 · sites: 해외 검색 대상 매체 · focus: 요약 지시
+PRESETS = {
+    "바이오": {
+        "key": "해외바이오",
+        "label": "바이오 (해외 중심)",
+        "ko_query": "(FDA OR 빅파마 OR 글로벌 제약 OR 해외 바이오텍 OR 임상 3상) -특징주 -상한가 -코스닥",
+        "en": "biotech OR biopharma OR \"FDA approval\" OR \"clinical trial\"",
+        "sites": ["reuters.com", "bloomberg.com", "ft.com", "wsj.com", "cnbc.com", "statnews.com",
+                  "fiercebiotech.com", "endpts.com", "biopharmadive.com", "nytimes.com"],
+        "focus": "해외(미국·유럽·중국) 바이오·제약 동향 위주로 쓴다: FDA 승인·임상 결과·빅파마 M&A·약가 정책. "
+                 "국내 상장 바이오 종목의 주가·특징주 기사는 제외한다.",
+    },
+}
+
+
+def resolve(kw: dict) -> dict:
+    """목록 항목에 프리셋을 입혀 실제 처리용 설정을 만든다."""
+    p = PRESETS.get(kw["q"], {})
+    return {"q": kw["q"], "key": p.get("key", kw["q"]), "label": p.get("label", kw["q"]),
+            "ko_query": p.get("ko_query"), "en": p.get("en", kw.get("en", "")),
+            "sites": p.get("sites"), "focus": p.get("focus", "")}
 WEEKDAY = "월화수목금토일"
 
 
@@ -73,19 +100,20 @@ def list_text(items: list[dict] | None = None) -> str:
     items = get_list() if items is None else items
     if not items:
         return "관심 키워드가 없습니다. `@radar 관심 추가 키워드` 로 등록하세요."
-    body = "\n".join(f"• *{i['q']}*" + (f"  (해외: {i['en']})" if i["en"] else "") for i in items)
+    body = "\n".join(f"• *{resolve(i)['label']}*" + (f"  (해외: {resolve(i)['en']})" if resolve(i)["en"] else "")
+                     for i in items)
     day = f"매주 {WEEKDAY[int(FULL_WEEKDAY)]}요일" if FULL_WEEKDAY != "" else "정기 분석 없음"
     return (f"*관심 키워드 {len(items)}/{WATCH_MAX}*\n{body}\n"
             f"_매일 아침 브리핑에 24시간 동향 표시 · 전체 분석: 첫 등록 다음 날, {day}, 보도량 {SPIKE_RATIO:g}배 급증 시_")
 
 
 # ---------------------------------------------------------------- 매일 동향
-def _search_1d(q: str, lang: str) -> list[dict]:
+def _search_1d(q: str, lang: str, sites: list[str] | None = None, days: int = 1) -> list[dict]:
     if lang == "en":
-        sites = " OR ".join(f"site:{s}" for s in config.FOREIGN_SITES)
-        full, region = f"{q} ({sites}) when:1d", "hl=en-US&gl=US&ceid=US:en"
+        sites_q = " OR ".join(f"site:{s}" for s in (sites or config.FOREIGN_SITES))
+        full, region = f"({q}) ({sites_q}) when:{days}d", "hl=en-US&gl=US&ceid=US:en"
     else:
-        full, region = f"{q} when:1d", "hl=ko&gl=KR&ceid=KR:ko"
+        full, region = f"{q} when:{days}d", "hl=ko&gl=KR&ceid=KR:ko"
     r = requests.get(f"https://news.google.com/rss/search?q={quote_plus(full)}&{region}", headers=UA, timeout=15)
     r.raise_for_status()
     out = []
@@ -109,41 +137,48 @@ def _baseline(q: str, today: str) -> tuple[float | None, int]:
 
 
 def daily_update(kw: dict) -> dict:
-    """지난 24시간 기사 수집 → DB 저장(전체 분석에도 재사용) → 평소 대비 배율 → LLM 2~3줄 요약."""
-    q, en, today = kw["q"], kw.get("en", ""), date.today().isoformat()
-    ko = _search_1d(q, "ko")
-    fo = _search_1d(en, "en") if en else []
+    """최근 WATCH_DAYS일 기사 수집 → DB 저장(전체 분석에도 재사용) → 평소 대비 배율 → LLM 2~3줄 요약."""
+    c = resolve(kw)
+    q, en, today = c["key"], c["en"], date.today().isoformat()
+    ko = _search_1d(c["ko_query"] or c["q"], "ko", days=WATCH_DAYS)
+    fo = _search_1d(en, "en", c["sites"], days=WATCH_DAYS) if en else []
     time.sleep(0.5)
     db.insert_articles([_row(q, a["title"], a["url"], a["source"], a["published"], "", "ko", "google_ko") for a in ko]
                        + [_row(q, a["title"], a["url"], a["source"], a["published"], "", "en", "google_foreign")
                           for a in fo])
     n, n_en = len({a["title"] for a in ko}), len({a["title"] for a in fo})
     base, days = _baseline(q, today)
-    with db.conn() as c:
-        c.execute("INSERT OR REPLACE INTO watch_stats(day,query,n,n_en) VALUES (?,?,?,?)", (today, q, n, n_en))
-    ratio = (n + n_en) / base if base else None
+    per_day = (n + n_en) / WATCH_DAYS                     # 하루 평균으로 환산해 저장·비교
+    with db.conn() as cx:
+        cx.execute("INSERT OR REPLACE INTO watch_stats(day,query,n,n_en) VALUES (?,?,?,?)",
+                   (today, q, round(n / WATCH_DAYS), round(n_en / WATCH_DAYS)))
+    ratio = per_day / base if base else None
 
     bullets, headline = [], ""
-    titles = [f"- {a['title']} ({a['source']})" for a in ko[:30]] + [f"- [해외] {a['title']} ({a['source']})"
-                                                                       for a in fo[:15]]
+    ko_n, fo_n = (10, 35) if c["focus"] else (30, 15)     # 해외 중심 키워드는 해외 기사 비중을 높임
+    titles = [f"- {a['published']} {a['title']} ({a['source']})" for a in ko[:ko_n]] + \
+             [f"- {a['published']} [해외] {a['title']} ({a['source']})" for a in fo[:fo_n]]
     if titles:
         try:
             r = chat_json("너는 뉴스 모니터링 담당자다. 주어진 제목만 근거로 한국어로 쓴다. 사실을 지어내지 마라.",
-                          f'관심 키워드 "{q}" 지난 24시간 기사 제목:\n' + "\n".join(titles) +
+                          f'관심 키워드 "{c["label"]}" 최근 {WATCH_DAYS}일 기사 제목 (날짜 포함):\n' + "\n".join(titles) +
+                          (f"\n\n작성 지침: {c['focus']}" if c["focus"] else "") +
                           '\n\nJSON: {"headline": "가장 중요한 움직임 한 문장", "bullets": ["주요 동향 2~3개, 각 1문장"]}',
                           max_tokens=800, fast=True)
             headline = str(r.get("headline") or "")
             bullets = [str(b) for b in (r.get("bullets") or [])][:3]
         except Exception as e:
             headline = f"(요약 실패: {type(e).__name__})"
-    links = [(a["source"], a["url"]) for a in (fo[:1] + ko[:2]) if a.get("url")]
-    return dict(q=q, en=en, n=n, n_en=n_en, capped=len(ko) >= 100, ratio=ratio, base_days=days,
+    top = (fo[:2] + ko[:1]) if c["focus"] else (fo[:1] + ko[:2])
+    links = [(a["source"], a["url"]) for a in top if a.get("url")]
+    return dict(q=c["q"], key=q, label=c["label"], en=en, ko_query=c["ko_query"], sites=c["sites"],
+                n=n, n_en=n_en, capped=len(ko) >= 100, ratio=ratio, base_days=days,
                 headline=headline, bullets=bullets, links=links, full=None)
 
 
 def full_reason(r: dict, now: datetime) -> str | None:
     """전체 분석(쟁점·예측)을 돌릴 이유. 없으면 None."""
-    if db.latest_report(r["q"], "brief") is None:
+    if db.latest_report(r["key"], "brief") is None:
         return "첫 분석"
     if r["ratio"] and r["ratio"] >= SPIKE_RATIO:
         return f"보도량 {r['ratio']:.1f}배 급증"
@@ -159,13 +194,13 @@ def blocks(results: list[dict]) -> list[dict]:
     out = [{"type": "divider"},
            {"type": "section", "text": {"type": "mrkdwn", "text": f"*관심 키워드*  ({len(results)}개)"}}]
     for r in results:
-        n_txt = f"{r['n']}{'+' if r['capped'] else ''}건" + (f" · 해외 {r['n_en']}건" if r["en"] else "")
+        n_txt = f"최근 {WATCH_DAYS}일 {r['n']}{'+' if r['capped'] else ''}건" + (f" · 해외 {r['n_en']}건" if r["en"] else "")
         if r["ratio"] is None:
             trend = f"평소 수준 계산 중 ({r['base_days']}/{MIN_BASE_DAYS}일)"
         else:
             trend = f"평소 대비 {r['ratio']:.1f}배" + (" :chart_with_upwards_trend: 급증" if r["ratio"] >= SPIKE_RATIO
                                                    else " ↓" if r["ratio"] < 0.5 else "")
-        txt = f"*{r['q']}*   `{n_txt}` `{trend}`"
+        txt = f"*{r['label']}*   `{n_txt}` `{trend}`"
         if r["headline"]:
             txt += f"\n{r['headline']}"
         txt += "".join(f"\n• {b}" for b in r["bullets"])

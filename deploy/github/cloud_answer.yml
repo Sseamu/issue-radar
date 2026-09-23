@@ -24,8 +24,8 @@ jobs:
       CLOUD_OPENAI_MODEL: ${{ vars.CLOUD_OPENAI_MODEL }}
       CLOUD_MAX_PER_RUN: ${{ vars.CLOUD_MAX_PER_RUN || '3' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
