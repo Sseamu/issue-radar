@@ -1,0 +1,30 @@
+# PC가 꺼져 있을 때 @radar 요청에 클라우드(Claude/OpenAI + 웹 검색)로 답하는 예약 실행
+# 사용법: 이 파일을 저장소의 .github/workflows/cloud_answer.yml 로 복사
+name: cloud-answer
+on:
+  schedule:
+    - cron: "*/30 0-14,23 * * *"   # 한국 08:00~23:59, 30분마다 (GitHub 사정으로 5~15분 늦을 수 있음)
+  workflow_dispatch: {}             # Actions 탭의 수동 실행 버튼
+concurrency: cloud-answer           # 앞 실행이 안 끝났으면 겹치지 않게
+
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-cloud.txt
+      - run: pip install -r requirements-cloud.txt
+      - run: python -m radar.cloud_answer
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CLOUD_PROVIDER: ${{ vars.CLOUD_PROVIDER || 'anthropic' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLOUD_ANTHROPIC_MODEL: ${{ vars.CLOUD_ANTHROPIC_MODEL || 'claude-sonnet-5' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLOUD_OPENAI_MODEL: ${{ vars.CLOUD_OPENAI_MODEL }}
+          CLOUD_MAX_PER_RUN: ${{ vars.CLOUD_MAX_PER_RUN || '3' }}

@@ -1,0 +1,21 @@
+# 공통
+requests>=2.31
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+openpyxl>=3.1          # 빅카인즈 엑셀
+python-dotenv>=1.0
+streamlit>=1.50
+plotly>=5.20
+kiwipiepy>=0.18        # 한국어 형태소(명사 추출)
+
+# 임베딩 (GPU). torch는 README 순서대로 CUDA 12.8 빌드를 먼저 설치할 것
+sentence-transformers>=3.0
+
+# 선택: API LLM 사용 시
+# anthropic>=0.40
+
+# Slack 봇
+slack_bolt>=1.20
+slack_sdk>=3.27
+apscheduler>=3.10,<4

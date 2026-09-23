@@ -1,0 +1,29 @@
+# api.slack.com/apps → Create New App → From a manifest → 이 내용을 붙여넣기
+display_information:
+  name: Issue Radar
+  description: 뉴스 쟁점 분석·예측 + 아침 브리핑
+features:
+  bot_user:
+    display_name: radar
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - chat:write.public
+      - channels:history
+      - groups:history
+      - channels:read
+      - groups:read
+      - reactions:read
+      - reactions:write
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

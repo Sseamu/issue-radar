@@ -1,0 +1,17 @@
+[Unit]
+Description=Issue Radar Slack bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__DIR__
+Environment=TZ=Asia/Seoul
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__DIR__/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+MemoryMax=900M
+
+[Install]
+WantedBy=multi-user.target

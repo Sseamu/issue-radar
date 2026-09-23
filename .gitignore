@@ -1,0 +1,9 @@
+# 비밀 정보·개인 데이터는 올리지 않음
+.env
+.env.*
+!.env.example
+data/
+.venv/
+__pycache__/
+*.log
+NO_SHUTDOWN

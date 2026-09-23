@@ -1,0 +1,325 @@
+{
+  "_설명": "섹션별 RSS 목록. type=google 은 구글 뉴스 섹션 헤드라인(관련 기사 묶음 수를 보도량 힌트로 사용). 언론사 RSS 주소는 바뀔 수 있으니 `python -m radar.daily --check-feeds`로 점검하고, 0건인 피드는 지우거나 고치세요. 브리핑 구성은 _groups(그룹별 개수·해외 최소 개수), _boost_words(우선할 키워드), _exclude_words(제외할 사건사고 단어)로 조정합니다.",
+  "_groups": [
+    {
+      "name": "경제 · 테크 (AI·신기술 우선)",
+      "sections": [
+        "경제·증권",
+        "IT·과학",
+        "해외 경제",
+        "해외 테크"
+      ],
+      "n": 5,
+      "min_foreign": 2,
+      "boost": true
+    },
+    {
+      "name": "그 밖의 주요 이슈",
+      "sections": [
+        "정치·사회",
+        "해외 국제"
+      ],
+      "n": 5,
+      "min_foreign": 2
+    }
+  ],
+  "_boost_factor": 1.4,
+  "_boost_words": [
+    "ai",
+    "agi",
+    "인공지능",
+    "생성형",
+    "llm",
+    "오픈ai",
+    "openai",
+    "chatgpt",
+    "챗gpt",
+    "gpt",
+    "anthropic",
+    "앤트로픽",
+    "claude",
+    "gemini",
+    "제미나이",
+    "딥시크",
+    "deepseek",
+    "xai",
+    "grok",
+    "엔비디아",
+    "nvidia",
+    "반도체",
+    "semiconductor",
+    "chip",
+    "chips",
+    "hbm",
+    "tsmc",
+    "파운드리",
+    "로봇",
+    "robot",
+    "robotics",
+    "휴머노이드",
+    "humanoid",
+    "양자",
+    "quantum",
+    "자율주행",
+    "self-driving",
+    "autonomous",
+    "데이터센터",
+    "data center",
+    "신기술",
+    "스타트업",
+    "startup",
+    "우주",
+    "spacex",
+    "배터리",
+    "battery"
+  ],
+  "_exclude_sections": [
+    "정치·사회",
+    "해외 국제"
+  ],
+  "_exclude_words": [
+    "사고",
+    "화재",
+    "불이 나",
+    "불길",
+    "추락",
+    "숨져",
+    "숨진",
+    "사망",
+    "사상자",
+    "부상자",
+    "다쳐",
+    "중상",
+    "살해",
+    "살인",
+    "흉기",
+    "폭행",
+    "교통사고",
+    "추돌",
+    "실종",
+    "익사",
+    "물에 빠",
+    "붕괴",
+    "음주운전",
+    "성폭행",
+    "성범죄",
+    "스토킹",
+    "방화",
+    "투신",
+    "변사",
+    "시신",
+    "치여",
+    "shooting",
+    "stabbing",
+    "car crash",
+    "house fire",
+    "drowned",
+    "murder trial"
+  ],
+  "IT·과학": [
+    {
+      "name": "구글뉴스 IT",
+      "type": "google",
+      "url": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=ko&gl=KR&ceid=KR:ko"
+    },
+    {
+      "name": "구글뉴스 과학",
+      "type": "google",
+      "url": "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=ko&gl=KR&ceid=KR:ko"
+    },
+    {
+      "name": "연합뉴스 산업",
+      "url": "https://www.yna.co.kr/rss/industry.xml"
+    },
+    {
+      "name": "한국경제 IT",
+      "url": "https://www.hankyung.com/feed/it"
+    },
+    {
+      "name": "ZDNet Korea",
+      "url": "https://feeds.feedburner.com/zdkorea"
+    },
+    {
+      "name": "전자신문",
+      "url": "https://rss.etnews.com/Section901.xml"
+    },
+    {
+      "name": "한겨레 과학",
+      "url": "https://www.hani.co.kr/rss/science/"
+    },
+    {
+      "name": "동아일보 과학",
+      "url": "https://rss.donga.com/science.xml"
+    }
+  ],
+  "경제·증권": [
+    {
+      "name": "구글뉴스 경제",
+      "type": "google",
+      "url": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=ko&gl=KR&ceid=KR:ko"
+    },
+    {
+      "name": "연합뉴스 경제",
+      "url": "https://www.yna.co.kr/rss/economy.xml"
+    },
+    {
+      "name": "연합뉴스 마켓",
+      "url": "https://www.yna.co.kr/rss/market.xml"
+    },
+    {
+      "name": "한국경제 경제",
+      "url": "https://www.hankyung.com/feed/economy"
+    },
+    {
+      "name": "한국경제 증권",
+      "url": "https://www.hankyung.com/feed/finance"
+    },
+    {
+      "name": "한겨레 경제",
+      "url": "https://www.hani.co.kr/rss/economy/"
+    },
+    {
+      "name": "동아일보 경제",
+      "url": "https://rss.donga.com/economy.xml"
+    },
+    {
+      "name": "경향신문 경제",
+      "url": "https://www.khan.co.kr/rss/rssdata/economy_news.xml"
+    }
+  ],
+  "정치·사회": [
+    {
+      "name": "구글뉴스 국내",
+      "type": "google",
+      "url": "https://news.google.com/rss/headlines/section/topic/NATION?hl=ko&gl=KR&ceid=KR:ko"
+    },
+    {
+      "name": "연합뉴스 정치",
+      "url": "https://www.yna.co.kr/rss/politics.xml"
+    },
+    {
+      "name": "연합뉴스 사회",
+      "url": "https://www.yna.co.kr/rss/society.xml"
+    },
+    {
+      "name": "한겨레 정치",
+      "url": "https://www.hani.co.kr/rss/politics/"
+    },
+    {
+      "name": "한겨레 사회",
+      "url": "https://www.hani.co.kr/rss/society/"
+    },
+    {
+      "name": "동아일보 정치",
+      "url": "https://rss.donga.com/politics.xml"
+    },
+    {
+      "name": "동아일보 사회",
+      "url": "https://rss.donga.com/national.xml"
+    },
+    {
+      "name": "경향신문 정치",
+      "url": "https://www.khan.co.kr/rss/rssdata/politic_news.xml"
+    },
+    {
+      "name": "경향신문 사회",
+      "url": "https://www.khan.co.kr/rss/rssdata/society_news.xml"
+    }
+  ],
+  "해외 테크": [
+    {
+      "name": "Google News Tech (US)",
+      "type": "google",
+      "lang": "en",
+      "url": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en"
+    },
+    {
+      "name": "TechCrunch",
+      "lang": "en",
+      "outlet": "TechCrunch",
+      "url": "https://techcrunch.com/feed/"
+    },
+    {
+      "name": "The Verge",
+      "lang": "en",
+      "outlet": "The Verge",
+      "url": "https://www.theverge.com/rss/index.xml"
+    },
+    {
+      "name": "MIT Technology Review",
+      "lang": "en",
+      "outlet": "MIT Technology Review",
+      "url": "https://www.technologyreview.com/feed/"
+    },
+    {
+      "name": "Ars Technica",
+      "lang": "en",
+      "outlet": "Ars Technica",
+      "url": "https://feeds.arstechnica.com/arstechnica/index"
+    },
+    {
+      "name": "NYT Technology",
+      "lang": "en",
+      "outlet": "NYT",
+      "url": "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"
+    }
+  ],
+  "해외 경제": [
+    {
+      "name": "Google News Business (US)",
+      "type": "google",
+      "lang": "en",
+      "url": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en"
+    },
+    {
+      "name": "CNBC Top News",
+      "lang": "en",
+      "outlet": "CNBC",
+      "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    },
+    {
+      "name": "BBC Business",
+      "lang": "en",
+      "outlet": "BBC",
+      "url": "https://feeds.bbci.co.uk/news/business/rss.xml"
+    },
+    {
+      "name": "NYT Business",
+      "lang": "en",
+      "outlet": "NYT",
+      "url": "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"
+    }
+  ],
+  "해외 국제": [
+    {
+      "name": "Google News World (US)",
+      "type": "google",
+      "lang": "en",
+      "url": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en"
+    },
+    {
+      "name": "BBC World",
+      "lang": "en",
+      "outlet": "BBC",
+      "url": "https://feeds.bbci.co.uk/news/world/rss.xml"
+    },
+    {
+      "name": "NYT World",
+      "lang": "en",
+      "outlet": "NYT",
+      "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
+    },
+    {
+      "name": "The Guardian World",
+      "lang": "en",
+      "outlet": "The Guardian",
+      "url": "https://www.theguardian.com/world/rss"
+    },
+    {
+      "name": "Al Jazeera",
+      "lang": "en",
+      "outlet": "Al Jazeera",
+      "url": "https://www.aljazeera.com/xml/rss/all.xml"
+    }
+  ]
+}

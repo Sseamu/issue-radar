@@ -1,0 +1,9 @@
+# 아침 브리핑(GitHub Actions)용 최소 패키지 - GPU/임베딩 불필요
+requests>=2.31
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+python-dotenv>=1.0
+slack_sdk>=3.27
+anthropic>=0.40
+kiwipiepy>=0.18
