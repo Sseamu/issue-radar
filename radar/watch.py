@@ -17,13 +17,14 @@ from urllib.parse import quote_plus
 import requests
 
 from . import config, db
-from .collect import UA, _row, _to_date, clean
+from .collect import UA, _google_rss, _row, _to_date, clean
 from .llm import chat_json
 
 SPIKE_RATIO = float(config.env("WATCH_SPIKE_RATIO", "2.0"))     # 평소 대비 이 배율 이상이면 급증
 FULL_WEEKDAY = config.env("WATCH_FULL_WEEKDAY", "0")            # 정기 전체 분석 요일 (0=월 … 6=일, 비우면 안 함)
 WATCH_MAX = int(config.env("WATCH_MAX", "10"))                  # 최대 등록 개수
 WATCH_DAYS = int(config.env("WATCH_DAYS", "2"))                 # 동향·최근 이슈를 볼 기간(일)
+MONTH_WEEKS = int(config.env("WATCH_MONTH_WEEKS", "4"))          # 한 달 트렌드: 최근 N주를 주 단위로 비교
 MIN_BASE_DAYS = 3                                               # 평소 수준 계산에 필요한 최소 일수
 
 # 키워드별 세부 설정. 이름이 같으면 자동 적용 (Slack 에서 '관심 추가 바이오' 해도 적용됨)
@@ -154,26 +155,70 @@ def daily_update(kw: dict) -> dict:
                    (today, q, round(n / WATCH_DAYS), round(n_en / WATCH_DAYS)))
     ratio = per_day / base if base else None
 
-    bullets, headline = [], ""
+    weeks = month_scan(c)
+    bullets, headline, month, trend = [], "", [], ""
     ko_n, fo_n = (10, 35) if c["focus"] else (30, 15)     # 해외 중심 키워드는 해외 기사 비중을 높임
+    wk_ko, wk_fo = (3, 9) if c["focus"] else (8, 4)       # 한 달 표본: 주당 제목 수
+    month_lines = []
+    for i, w in enumerate(weeks, 1):
+        month_lines.append(f"[{i}주차 {w['start']:%m/%d}~{w['end']:%m/%d} · 기사 {w['n']}{'+' if w['capped'] else ''}건]")
+        month_lines += [f"- {a['title']}" for a in w["ko"][:wk_ko]] + [f"- [해외] {a['title']}" for a in w["fo"][:wk_fo]]
     titles = [f"- {a['published']} {a['title']} ({a['source']})" for a in ko[:ko_n]] + \
              [f"- {a['published']} [해외] {a['title']} ({a['source']})" for a in fo[:fo_n]]
-    if titles:
+    if titles or any(w["n"] for w in weeks):
         try:
             r = chat_json("너는 뉴스 모니터링 담당자다. 주어진 제목만 근거로 한국어로 쓴다. 사실을 지어내지 마라.",
-                          f'관심 키워드 "{c["label"]}" 최근 {WATCH_DAYS}일 기사 제목 (날짜 포함):\n' + "\n".join(titles) +
+                          f'관심 키워드 "{c["label"]}"\n\n## A. 최근 {WATCH_DAYS}일 기사 제목 (날짜 포함)\n' + "\n".join(titles) +
+                          f"\n\n## B. 최근 {len(weeks)}주 주차별 기사 수와 제목 표본 (1주차가 가장 오래됨)\n" +
+                          "\n".join(month_lines) +
                           (f"\n\n작성 지침: {c['focus']}" if c["focus"] else "") +
-                          '\n\nJSON: {"headline": "가장 중요한 움직임 한 문장", "bullets": ["주요 동향 2~3개, 각 1문장"]}',
-                          max_tokens=800, fast=True)
+                          '\n\nJSON: {"headline": "A 기준 가장 중요한 움직임 한 문장", '
+                          '"bullets": ["A 기준 주요 동향 2~3개, 각 1문장"], '
+                          '"month": ["B 기준 한 달 흐름 2~3개: 무엇이 커지고 줄었는지, 반복되는 주제, 전환점"], '
+                          '"trend": "상승|유지|하락 중 하나 + 이유 한 구절 (예: 상승 — 임상 결과 발표가 이어짐)"}',
+                          max_tokens=1200, fast=True)
             headline = str(r.get("headline") or "")
             bullets = [str(b) for b in (r.get("bullets") or [])][:3]
+            month = [str(b) for b in (r.get("month") or [])][:3]
+            trend = str(r.get("trend") or "")
         except Exception as e:
             headline = f"(요약 실패: {type(e).__name__})"
     top = (fo[:2] + ko[:1]) if c["focus"] else (fo[:1] + ko[:2])
     links = [(a["source"], a["url"]) for a in top if a.get("url")]
     return dict(q=c["q"], key=q, label=c["label"], en=en, ko_query=c["ko_query"], sites=c["sites"],
                 n=n, n_en=n_en, capped=len(ko) >= 100, ratio=ratio, base_days=days,
-                headline=headline, bullets=bullets, links=links, full=None)
+                headline=headline, bullets=bullets, links=links, full=None,
+                weekly=[w["n"] for w in weeks], weekly_capped=any(w["capped"] for w in weeks),
+                month=month, month_trend=trend)
+
+
+def month_scan(c: dict) -> list[dict]:
+    """최근 MONTH_WEEKS주를 1주 단위로 검색 → 주별 기사 수(검색 1회 최대 100건)와 제목 표본.
+    같은 방식으로 매주 세므로 주끼리 비교할 수 있다. 오래된 주부터 반환."""
+    weeks, end = [], date.today() + timedelta(days=1)
+    sites_q = " OR ".join(f"site:{s}" for s in (c["sites"] or config.FOREIGN_SITES))
+    for i in range(MONTH_WEEKS):
+        e, s = end - timedelta(days=7 * i), end - timedelta(days=7 * (i + 1))
+        try:
+            ko = _google_rss(c["ko_query"] or c["q"], s, e, "ko")
+            time.sleep(0.5)
+            fo = _google_rss(f"({c['en']}) ({sites_q})", s, e, "en") if c["en"] else []
+            time.sleep(0.5)
+        except Exception:
+            ko, fo = [], []
+        db.insert_articles([_row(c["key"], a["title"], a["url"], a["source"], a["published"] or s.isoformat(), "",
+                                 "ko", "google_ko") for a in ko if a["title"]] +
+                           [_row(c["key"], a["title"], a["url"], a["source"], a["published"] or s.isoformat(), "",
+                                 "en", "google_foreign") for a in fo if a["title"]])
+        weeks.append(dict(start=s, end=e - timedelta(days=1), ko=ko, fo=fo,
+                          n=len({a["title"] for a in ko}) + len({a["title"] for a in fo}),
+                          capped=len(ko) >= 95 or len(fo) >= 95))
+    return list(reversed(weeks))
+
+
+def _spark(vals: list[int]) -> str:
+    bars, m = "▁▂▃▄▅▆▇█", max(vals) or 1
+    return "".join(bars[min(7, int(v / m * 7))] for v in vals)
 
 
 def full_reason(r: dict, now: datetime) -> str | None:
@@ -204,9 +249,15 @@ def blocks(results: list[dict]) -> list[dict]:
         if r["headline"]:
             txt += f"\n{r['headline']}"
         txt += "".join(f"\n• {b}" for b in r["bullets"])
+        if r.get("weekly"):
+            wk = "·".join(str(v) for v in r["weekly"]) + ("+" if r.get("weekly_capped") else "")
+            txt += f"\n*최근 한 달*  `주별 기사 {wk}건 {_spark(r['weekly'])}`"
+            if r.get("month_trend"):
+                txt += f"  `추세: {r['month_trend'][:40]}`"
+            txt += "".join(f"\n• {b}" for b in r.get("month", []))
         if r["links"]:
             txt += "\n" + " · ".join(f"<{u}|{o or '원문'}>" for o, u in r["links"])
         if r.get("full"):
-            txt += f"\n_→ 전체 분석({r['full']})을 #radar 스레드에 올렸습니다_"
+            txt += f"\n_→ 전체 분석({r['full']})을 이 메시지 스레드에 이어서 올립니다_"
         out.append({"type": "section", "text": {"type": "mrkdwn", "text": txt[:2900]}})
     return out

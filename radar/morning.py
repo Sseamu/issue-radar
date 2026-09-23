@@ -218,37 +218,63 @@ def do_end(action: str):
 
 
 # ---------------------------------------------------------------- 관심 키워드
-def run_watch(client, deadline: float, now: datetime) -> list[dict]:
+def run_watch_daily(deadline: float, now: datetime) -> list[dict]:
+    """관심 키워드별 최근 동향 수집·요약 + 전체 분석이 필요한지 판단 (게시는 브리핑 뒤에)."""
     results = []
     for kw in watch.get_list():
         if time.time() + 60 > deadline:
             log.info("관심 키워드: 시간 부족으로 %s 이후 생략", kw["q"])
             break
         try:
-            results.append(watch.daily_update(kw))
-        except Exception as e:
+            r = watch.daily_update(kw)
+            r["full"] = watch.full_reason(r, now)
+            results.append(r)
+        except Exception:
             log.exception("관심 키워드 동향 실패: %s", kw["q"])
-    for r in results:  # 전체 분석은 필요한 키워드만, 남은 시간 안에서
-        reason = watch.full_reason(r, now)
+    return results
+
+
+def post_watch(client, results: list[dict], title_date: datetime, post_at: int | None = None) -> str | None:
+    """데일리 브리핑 다음에 보내는 '관심 키워드 브리핑' 메시지. 즉시 게시면 ts 반환(전체 분석을 스레드로 달기 위해)."""
+    if not results:
+        return None
+    d = title_date
+    blocks = [{"type": "header", "text": {"type": "plain_text",
+               "text": f"{d.month}월 {d.day}일 관심 키워드 브리핑 · 최근 {watch.WATCH_DAYS}일"}}] + watch.blocks(results)[1:]
+    text = f"관심 키워드 브리핑 ({len(results)}개)"
+    if post_at:
+        client.chat_scheduleMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=text,
+                                    post_at=post_at, unfurl_links=False)
+        return None
+    return client.chat_postMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=text,
+                                   unfurl_links=False)["ts"]
+
+
+def run_watch_full(client, results: list[dict], deadline: float, thread_ts: str | None):
+    """전체 분석(1년 쟁점·예측). 관심 키워드 브리핑 메시지의 스레드에 단다."""
+    for r in results:
+        reason = r.get("full")
         if not reason:
             continue
         if time.time() + EST_ANALYZE_MIN * 60 > deadline:
             log.info("관심 키워드 전체 분석 생략(시간 부족): %s", r["q"])
             continue
+        head = None
         try:
-            head = client.chat_postMessage(channel=config.SLACK_ALERT_CHANNEL,
+            head = client.chat_postMessage(channel=config.SLACK_BRIEF_CHANNEL, thread_ts=thread_ts,
                                            text=f"*[관심 키워드 분석] {r['label']}* · {reason} · 최근 이슈는 {watch.WATCH_DAYS}일 기준")
-            handlers.run_analyze(client, head["channel"], head["ts"], r["key"], r.get("en", ""),
+            root = thread_ts or head["ts"]
+            handlers.run_analyze(client, head["channel"], root, r["key"], r.get("en", ""),
                                  ko_query=r.get("ko_query"), foreign_sites=r.get("sites"),
                                  recent_days=watch.WATCH_DAYS)
-            r["full"] = reason
         except Exception as e:
             log.exception("관심 키워드 전체 분석 실패: %s", r["q"])
-            try:
-                handlers.say_thread(client, head["channel"], head["ts"], f":x: 분석 실패: `{type(e).__name__}: {e}`")
-            except Exception:
-                pass
-    return results
+            if head:
+                try:
+                    handlers.say_thread(client, head["channel"], thread_ts or head["ts"],
+                                        f":x: 분석 실패: `{type(e).__name__}: {e}`")
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------- 브리핑 시각
@@ -328,7 +354,7 @@ def main():
         summary.append(f"채점 반영 {scored}건 · 채점 요청 {posted}건")
 
         # 2) 관심 키워드: 24시간 동향 + (첫 분석·정기·급증 시) 전체 분석
-        watch_results = run_watch(client, queue_deadline, started) if want_brief else []   # 하루 한 번
+        watch_results = run_watch_daily(queue_deadline, started) if want_brief else []   # 하루 한 번
         if watch_results:
             summary.append(f"관심 키워드 {len(watch_results)}개")
 
@@ -337,19 +363,24 @@ def main():
             try:
                 if brief_at and not BRIEF_SCHEDULE:
                     _sleep_until(brief_at.timestamp() - BRIEF_LEAD_MIN * 60, "브리핑 생성")
+                t0 = time.time()
                 blocks, title = daily.to_blocks(daily.build_brief(_sections()))
-                blocks = blocks[:-1] + watch.blocks(watch_results) + blocks[-1:]   # 하단 요약줄 앞에 삽입
+                log.info("브리핑 생성 %.0f초", time.time() - t0)
                 if brief_at and BRIEF_SCHEDULE and brief_at.timestamp() - time.time() > 90:
                     # Slack 예약 전송: PC가 꺼져도 Slack 서버가 BRIEF_AT 에 보낸다
                     client.chat_scheduleMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=title,
                                                 post_at=int(brief_at.timestamp()), unfurl_links=False)
+                    post_watch(client, watch_results, started, post_at=int(brief_at.timestamp()) + 60)
                     summary.append(f"브리핑 {datetime.now():%H:%M} 생성 → {brief_at:%H:%M} 예약 전송")
+                    run_watch_full(client, watch_results, queue_deadline, None)
                 else:
                     if brief_at:
                         _sleep_until(brief_at.timestamp(), "브리핑 전송")
                     client.chat_postMessage(channel=config.SLACK_BRIEF_CHANNEL, blocks=blocks[:50], text=title,
                                             unfurl_links=False)
                     summary.append(f"브리핑 전송 {datetime.now():%H:%M}")
+                    wts = post_watch(client, watch_results, started)          # 데일리 브리핑 → 관심 키워드 브리핑
+                    run_watch_full(client, watch_results, queue_deadline, wts)  # 전체 분석은 그 스레드에
                 db.kv_set("brief_date", today)
             except Exception as e:
                 log.exception("브리핑 실패")
