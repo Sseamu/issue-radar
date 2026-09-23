@@ -162,15 +162,14 @@ PC가 꺼져 있는 동안 남긴 `@radar 키워드` 요청에 **GitHub Actions�
 | 응답 | 요청 후 약 5~45분 (한국 시간 08~24시) | 다음 날 06~07시 |
 | 근거 | 웹 검색 몇 번 | 기사 1년치 수천 건 + 쟁점 군집 |
 | 예측 저장·채점 | X | O |
-| 비용 | 1건당 약 100~150원 (Sonnet 5 + 검색 약 4회) | 전기료 |
+| 비용 | Claude 구독 사용 시 추가 비용 없음 (API 사용 시 1건 약 100~150원) | 전기료 |
 
 설정 방법:
-1. github.com에서 **Private** 저장소를 만들고 이 폴더를 올립니다(`.env`와 `data/`는 자동으로 제외됩니다).
-2. `deploy/github/cloud_answer.yml`을 저장소의 **`.github/workflows/cloud_answer.yml`**로 복사합니다.
-3. 저장소 → Settings → Secrets and variables → Actions → **Secrets**에 `SLACK_BOT_TOKEN`, `ANTHROPIC_API_KEY`를 넣습니다.
-   - OpenAI를 쓰려면 Secret `OPENAI_API_KEY`를 넣고, **Variables**에 `CLOUD_PROVIDER=openai`, `CLOUD_OPENAI_MODEL=<웹 검색을 지원하는 모델명>`을 넣습니다.
-4. Actions 탭 → cloud-answer → **Run workflow**로 테스트합니다.
-5. console.anthropic.com에서 **월 사용 한도**를 꼭 설정하세요. 1회 실행당 최대 3건(`CLOUD_MAX_PER_RUN`)이라, 하루에 몰아서 요청해도 상한이 있습니다.
+1. GitHub Desktop으로 이 폴더를 **Private** 저장소에 올립니다. `.github/workflows/cloud_answer.yml`이 함께 올라갑니다.
+2. 저장소 → Settings → Secrets and variables → Actions → **Secrets**에 `SLACK_BOT_TOKEN`을 넣고, 아래 둘 중 하나를 고릅니다.
+   - **A. Claude 구독 사용 (Pro/Max, 추가 비용 없음, 추천)**: PC에서 Claude Code를 설치(`npm install -g @anthropic-ai/claude-code`)하고 `claude setup-token`을 실행합니다. 로그인 후 나오는 토큰을 Secret **`CLAUDE_CODE_OAUTH_TOKEN`**으로 넣습니다. 이 토큰이 있으면 자동으로 구독 방식으로 동작하며, 구독 사용량 한도 안에서 처리됩니다.
+   - **B. API 사용 (1건 약 100~150원)**: Secret `ANTHROPIC_API_KEY`를 넣습니다. OpenAI를 쓰려면 `OPENAI_API_KEY`를 넣고 Variables에 `CLOUD_PROVIDER=openai`, `CLOUD_OPENAI_MODEL=<모델명>`을 넣습니다.
+3. Slack에 `@radar 반도체`를 남기고 3분 기다린 뒤, Actions 탭 → cloud-answer → **Run workflow**로 테스트합니다.
 - 중복 방지: 클라우드가 답한 요청에는 ☁️ 반응이 달립니다. PC가 처리한 것(👀/✅)은 클라우드가 건드리지 않습니다. 스레드 후속 질문은 클라우드가 이미 답했으면 PC가 다시 답하지 않습니다.
 - `브리핑`·`성적`·`비용`·`관심` 명령은 PC의 DB가 필요해서 PC 배치만 처리합니다.
 

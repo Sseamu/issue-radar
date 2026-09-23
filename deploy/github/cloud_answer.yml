@@ -1,5 +1,5 @@
-# PC가 꺼져 있을 때 @radar 요청에 클라우드(Claude/OpenAI + 웹 검색)로 답하는 예약 실행
-# 사용법: 이 파일을 저장소의 .github/workflows/cloud_answer.yml 로 복사
+# PC가 꺼져 있을 때 @radar 요청에 클라우드(Claude 구독 / Claude API / OpenAI) 웹 검색으로 답하는 예약 실행
+# 위치: .github/workflows/cloud_answer.yml
 name: cloud-answer
 on:
   schedule:
@@ -10,7 +10,19 @@ concurrency: cloud-answer           # 앞 실행이 안 끝났으면 겹치지 �
 jobs:
   answer:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      # 구독 사용: CLAUDE_CODE_OAUTH_TOKEN (PC에서 `claude setup-token` 으로 발급) — 있으면 자동으로 구독 방식 사용
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # API 사용(선택): ANTHROPIC_API_KEY 또는 OPENAI_API_KEY + Variables 의 CLOUD_PROVIDER
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CLOUD_PROVIDER: ${{ vars.CLOUD_PROVIDER }}
+      CLOUD_CLAUDE_MODEL: ${{ vars.CLOUD_CLAUDE_MODEL }}
+      CLOUD_ANTHROPIC_MODEL: ${{ vars.CLOUD_ANTHROPIC_MODEL || 'claude-sonnet-5' }}
+      CLOUD_OPENAI_MODEL: ${{ vars.CLOUD_OPENAI_MODEL }}
+      CLOUD_MAX_PER_RUN: ${{ vars.CLOUD_MAX_PER_RUN || '3' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,12 +31,12 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-cloud.txt
       - run: pip install -r requirements-cloud.txt
-      - run: python -m radar.cloud_answer
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          CLOUD_PROVIDER: ${{ vars.CLOUD_PROVIDER || 'anthropic' }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLOUD_ANTHROPIC_MODEL: ${{ vars.CLOUD_ANTHROPIC_MODEL || 'claude-sonnet-5' }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLOUD_OPENAI_MODEL: ${{ vars.CLOUD_OPENAI_MODEL }}
-          CLOUD_MAX_PER_RUN: ${{ vars.CLOUD_MAX_PER_RUN || '3' }}
+      - name: 밀린 요청 확인
+        id: check
+        run: echo "n=$(python -m radar.cloud_answer --count)" >> "$GITHUB_OUTPUT"
+      - name: Claude Code 설치 (구독 방식이고 처리할 요청이 있을 때만)
+        if: steps.check.outputs.n != '0' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: npm install -g @anthropic-ai/claude-code
+      - name: 답변
+        if: steps.check.outputs.n != '0'
+        run: python -m radar.cloud_answer

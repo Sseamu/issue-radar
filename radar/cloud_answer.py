@@ -25,7 +25,9 @@ def env(k, d=""):
     return os.getenv(k, d).strip()
 
 
-PROVIDER = env("CLOUD_PROVIDER", "anthropic")                  # anthropic | openai
+# claude_code: Claude 구독(Pro/Max) — `claude setup-token` 토큰으로 Claude Code CLI 실행 (API 크레딧 불필요)
+# anthropic  : Claude API 키 (사용량 과금)      openai: OpenAI API 키
+PROVIDER = env("CLOUD_PROVIDER") or ("claude_code" if env("CLAUDE_CODE_OAUTH_TOKEN") else "anthropic")
 ANTHROPIC_MODEL = env("CLOUD_ANTHROPIC_MODEL", "claude-sonnet-5")
 OPENAI_MODEL = env("CLOUD_OPENAI_MODEL", env("OPENAI_MODEL", ""))
 LOOKBACK_H = float(env("CLOUD_LOOKBACK_HOURS", "12"))          # 이 시간 안의 요청만 대상
@@ -113,6 +115,22 @@ def ask_anthropic(q: str) -> tuple[str, list[tuple[str, str]]]:
     return text.strip(), list(cites.items())
 
 
+def ask_claude_code(q: str) -> tuple[str, list[tuple[str, str]]]:
+    """Claude 구독으로 실행. 웹 검색·페이지 읽기 도구만 허용하고 결과 텍스트를 받는다."""
+    import subprocess
+    prompt = (q + "\n\n마지막에 '*출처*' 제목 아래 참고한 기사 3~5개를 "
+              "`[1] <URL|제목>` 형식(Slack 링크)으로 적어라. 도구 사용 과정은 쓰지 말고 최종 답만 출력하라.")
+    cmd = ["claude", "-p", prompt, "--append-system-prompt", SYSTEM,
+           "--allowedTools", "WebSearch,WebFetch", "--max-turns", env("CLOUD_MAX_TURNS", "12"),
+           "--output-format", "text"]
+    if env("CLOUD_CLAUDE_MODEL"):
+        cmd += ["--model", env("CLOUD_CLAUDE_MODEL")]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise RuntimeError(f"claude CLI 실패({r.returncode}): {r.stderr.strip()[:300]}")
+    return r.stdout.strip(), []   # 출처는 본문에 포함됨
+
+
 def ask_openai(q: str) -> tuple[str, list[tuple[str, str]]]:
     if not OPENAI_MODEL:
         raise RuntimeError("CLOUD_OPENAI_MODEL(또는 OPENAI_MODEL)을 설정하세요")
@@ -136,8 +154,9 @@ def ask_openai(q: str) -> tuple[str, list[tuple[str, str]]]:
 
 def answer(it: dict) -> str:
     q = _question(it)
-    text, cites = ask_openai(q) if PROVIDER == "openai" else ask_anthropic(q)
-    name = "OpenAI" if PROVIDER == "openai" else "Claude"
+    ask = {"openai": ask_openai, "claude_code": ask_claude_code}.get(PROVIDER, ask_anthropic)
+    text, cites = ask(q)
+    name = {"openai": "OpenAI", "claude_code": "Claude(구독)"}.get(PROVIDER, "Claude")
     head = (f"_:cloud: PC가 꺼져 있어 {name} 웹 검색으로 간이 분석했습니다."
             + ("" if it["parent"] else " 1년치 데이터 기반 전체 분석은 다음 날 아침 PC 배치가 이 스레드에 이어서 올립니다.")
             + "_\n\n")
@@ -161,10 +180,14 @@ def _post(client, channel, thread_ts, text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--count", action="store_true", help="처리할 요청 수만 출력 (워크플로 분기용)")
     a = ap.parse_args()
     client = slack_client()
     bot_uid = client.auth_test()["user_id"]
     items = find_pending(client, bot_uid)
+    if a.count:
+        print(len(items))
+        return
     print(f"{datetime.now():%H:%M} 미처리 요청 {len(items)}건")
     for it in items:
         print(" -", it["text"][:60], "(스레드)" if it["thread_ts"] else "")
