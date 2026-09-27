@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from . import agent, config, daily, db, handlers, watch
+from . import agent, config, daily, db, handlers, opinion, watch
 from .slack_out import client as slack_client
 
 LOG_PATH = config.DB_PATH.parent / "morning.log"
@@ -63,6 +63,22 @@ def wait_network(timeout: int = 180) -> bool:
     return False
 
 
+_OLLAMA_PROC = None   # 배치가 직접 띄운 Ollama 서버 (끝나면 정리해서 사용자의 Ollama 앱과 충돌하지 않게)
+
+
+def stop_own_ollama():
+    """배치가 직접 켠 Ollama만 끈다. 남겨 두면 나중에 켠 Ollama 앱이 포트를 못 잡아 '모델 없음' 오류가 난다."""
+    global _OLLAMA_PROC
+    if _OLLAMA_PROC and _OLLAMA_PROC.poll() is None:
+        try:
+            _OLLAMA_PROC.terminate()
+            _OLLAMA_PROC.wait(timeout=15)
+            log.info("배치가 켠 Ollama 서버 종료")
+        except Exception as e:
+            log.warning("Ollama 서버 종료 실패: %s", e)
+    _OLLAMA_PROC = None
+
+
 def ensure_ollama(timeout: int = 180) -> bool:
     """로그인 없이 부팅된 상태라 Ollama 앱이 안 떠 있을 수 있다 → 직접 serve 실행 후 모델 예열."""
     if config.LLM_PROVIDER != "ollama":
@@ -80,17 +96,36 @@ def ensure_ollama(timeout: int = 180) -> bool:
         exe = exe if Path(exe).exists() else "ollama"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log.info("Ollama 시작: %s serve", exe)
-        subprocess.Popen([exe, "serve"], creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Ollama 서버 로그를 data/ollama.log 에 남긴다 (500 오류 등 원인 확인용)
+        olog = open(config.ROOT / "data" / "ollama.log", "ab")
+        env = os.environ.copy()
+        if config.env("OLLAMA_MODELS"):   # Ollama 앱 설정에서 모델 저장 위치를 바꿨다면 같은 위치를 알려 줘야 함
+            env["OLLAMA_MODELS"] = config.env("OLLAMA_MODELS")
+        global _OLLAMA_PROC
+        _OLLAMA_PROC = subprocess.Popen([exe, "serve"], creationflags=flags, stdout=olog, stderr=olog, env=env)
         end = time.time() + timeout
         while not alive():
             if time.time() > end:
                 return False
             time.sleep(3)
-    try:  # 모델을 GPU에 미리 올려 둠 (첫 호출 지연 제거)
-        requests.post(f"{url}/api/generate", json={"model": config.OLLAMA_MODEL, "prompt": "", "keep_alive": "40m"},
-                      timeout=180)
+    try:  # 모델이 이 Ollama에 실제로 있는지 확인 (없으면 404 → 요약 전부 실패)
+        names = [m["name"] for m in requests.get(f"{url}/api/tags", timeout=5).json().get("models", [])]
+        want = config.OLLAMA_MODEL
+        if not any(n == want or n == want + ":latest" for n in names):
+            log.error("Ollama에 모델 %s 이 없습니다. 보이는 모델: %s (모델 저장 위치가 다르면 .env 에 OLLAMA_MODELS 지정)",
+                      want, names or "없음")
     except Exception as e:
-        log.warning("모델 예열 실패: %s", e)
+        log.warning("모델 목록 확인 실패: %s", e)
+    for attempt in range(3):  # 모델을 GPU에 미리 올려 둠 (첫 호출 지연 제거). 부팅 직후엔 실패할 수 있어 재시도
+        try:
+            r = requests.post(f"{url}/api/generate", json={"model": config.OLLAMA_MODEL, "prompt": "",
+                                                           "keep_alive": "40m"}, timeout=180)
+            if r.ok:
+                break
+            log.warning("모델 예열 실패(HTTP %s): %s", r.status_code, r.text[:200])
+        except Exception as e:
+            log.warning("모델 예열 실패: %s", e)
+        time.sleep(20)
     return True
 
 
@@ -277,6 +312,49 @@ def run_watch_full(client, results: list[dict], deadline: float, thread_ts: str 
                     pass
 
 
+def extra_briefs(today: str) -> list[tuple[str, str]]:
+    """오늘 아직 안 보낸 추가 브리핑 [(이름, 채널)]. 채널이 .env 에 없으면 건너뜀."""
+    out = []
+    for p in daily.profiles():
+        try:
+            ch = daily.profile_channel(p)
+        except Exception:
+            log.exception("추가 브리핑 설정 오류: %s", p)
+            continue
+        if ch and db.kv_get(f"brief_date:{p}") != today:
+            out.append((p, ch))
+    return out
+
+
+def send_extra_briefs(client, today: str, summary: list, post_at: int | None = None):
+    """외교 브리핑 등 추가 브리핑을 각자의 채널로 보낸다 (기본 브리핑과 기능 동일, 설정 파일만 다름)."""
+    for p, ch in extra_briefs(today):
+        try:
+            t0 = time.time()
+            blocks, title = daily.to_blocks(daily.build_brief(profile=p))
+            log.info("%s 브리핑 생성 %.0f초", p, time.time() - t0)
+            scheduled = bool(post_at and post_at - time.time() > 90)
+            if scheduled:
+                client.chat_scheduleMessage(channel=ch, blocks=blocks[:50], text=title, post_at=post_at,
+                                            unfurl_links=False)
+                ts = None
+            else:
+                ts = client.chat_postMessage(channel=ch, blocks=blocks[:50], text=title, unfurl_links=False)["ts"]
+            db.kv_set(f"brief_date:{p}", today)
+            summary.append(f"{p} 브리핑 전송")
+            try:   # 오늘의 논점(사설·칼럼 비교): 브리핑 스레드에 답글 (예약 전송이면 1분 뒤 별도 메시지)
+                t0 = time.time()
+                if opinion.post(client, p, ch, thread_ts=ts, post_at=(post_at + 60) if scheduled else None):
+                    log.info("%s 오늘의 논점 %.0f초", p, time.time() - t0)
+                    summary.append(f"{p} 논점 전송")
+            except Exception as e:
+                log.exception("%s 오늘의 논점 실패", p)
+                summary.append(f"{p} 논점 실패({type(e).__name__})")
+        except Exception as e:
+            log.exception("%s 브리핑 실패", p)
+            summary.append(f"{p} 브리핑 실패({type(e).__name__})")
+
+
 # ---------------------------------------------------------------- 브리핑 시각
 def _brief_time(started: datetime) -> datetime | None:
     """오늘 BRIEF_AT 시각. 이미 지났거나 설정이 비어 있으면 None(= 바로 전송)."""
@@ -340,8 +418,8 @@ def main():
             return
 
         today = started.date().isoformat()
-        want_brief = (config.env("BRIEF_LOCAL", "1") == "1" and db.kv_get("brief_date") != today
-                      and started.strftime("%H:%M") >= BRIEF_EARLIEST)
+        in_brief_hours = config.env("BRIEF_LOCAL", "1") == "1" and started.strftime("%H:%M") >= BRIEF_EARLIEST
+        want_brief = in_brief_hours and db.kv_get("brief_date") != today
         brief_at = _brief_time(started) if want_brief else None
         # 브리핑 생성 시작 시각 = 전송 시각 - 생성 소요 시간. 그 전까지 밀린 요청을 처리한다
         queue_deadline = deadline
@@ -372,6 +450,7 @@ def main():
                                                 post_at=int(brief_at.timestamp()), unfurl_links=False)
                     post_watch(client, watch_results, started, post_at=int(brief_at.timestamp()) + 60)
                     summary.append(f"브리핑 {datetime.now():%H:%M} 생성 → {brief_at:%H:%M} 예약 전송")
+                    send_extra_briefs(client, today, summary, post_at=int(brief_at.timestamp()) + 120)
                     run_watch_full(client, watch_results, queue_deadline, None)
                 else:
                     if brief_at:
@@ -380,15 +459,22 @@ def main():
                                             unfurl_links=False)
                     summary.append(f"브리핑 전송 {datetime.now():%H:%M}")
                     wts = post_watch(client, watch_results, started)          # 데일리 브리핑 → 관심 키워드 브리핑
+                    db.kv_set("brief_date", today)
+                    send_extra_briefs(client, today, summary)                  # → 외교 브리핑(별도 채널)
                     run_watch_full(client, watch_results, queue_deadline, wts)  # 전체 분석은 그 스레드에
                 db.kv_set("brief_date", today)
             except Exception as e:
                 log.exception("브리핑 실패")
                 summary.append(f"브리핑 실패({type(e).__name__})")
+                send_extra_briefs(client, today, summary)   # 기본 브리핑이 실패해도 추가 브리핑은 시도
 
         # 3) 즉시 전송 모드(BRIEF_AT 비움): 브리핑을 먼저 보내고 나서 밀린 요청 처리
         if want_brief and not brief_at:
             send_brief()
+
+        # 기본 브리핑은 이미 보냈는데 추가 브리핑만 남은 경우 (예: 외교 채널을 오늘 새로 설정)
+        if in_brief_hours and not want_brief and extra_briefs(today):
+            send_extra_briefs(client, today, summary)
 
         # 4) 밀린 요청 처리
         done, left = process_queue(client, bot_uid, queue_deadline)
@@ -401,6 +487,7 @@ def main():
         log.exception("아침 배치 오류")
         summary.append("오류 발생(morning.log 확인)")
     finally:
+        stop_own_ollama()
         LOCK_PATH.unlink(missing_ok=True)
         elapsed = (datetime.now() - started).total_seconds() / 60
         action, why = ("none", "--no-end") if (a.no_end or a.dry_run) else end_decision(started)

@@ -24,9 +24,17 @@ def run_analyze(client, channel, ts, query, en, ko_query=None, foreign_sites=Non
 
 
 def run_brief(client, channel, thread_ts=None):
-    secs = [s for s in config.env("BRIEF_SECTIONS").split(",") if s.strip()] or None
-    blocks, title = daily.to_blocks(daily.build_brief(secs))
-    client.chat_postMessage(channel=channel, thread_ts=thread_ts, blocks=blocks[:50], text=title, unfurl_links=False)
+    profile = daily.profile_for_channel(channel)   # 외교 브리핑 채널에서 부르면 외교 브리핑
+    secs = None if profile else ([s for s in config.env("BRIEF_SECTIONS").split(",") if s.strip()] or None)
+    blocks, title = daily.to_blocks(daily.build_brief(secs, profile=profile))
+    r = client.chat_postMessage(channel=channel, thread_ts=thread_ts, blocks=blocks[:50], text=title,
+                                unfurl_links=False)
+    if profile:   # 외교 브리핑이면 '오늘의 논점'도 같은 스레드에
+        from . import opinion
+        try:
+            opinion.post(client, profile, channel, thread_ts=thread_ts or r["ts"])
+        except Exception as e:
+            say_thread(client, channel, thread_ts or r["ts"], f":x: 오늘의 논점 실패: `{type(e).__name__}: {e}`")
 
 
 def handle(intent: dict, client, channel: str, ts: str):

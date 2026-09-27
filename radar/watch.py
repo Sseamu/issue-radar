@@ -43,6 +43,10 @@ PRESETS = {
         "focus": "해외(미국·유럽·중국) 바이오·제약 동향 위주로 쓴다: FDA 승인·임상 결과·빅파마 M&A·약가 정책. "
                  "국내 상장 바이오 종목의 주가·특징주 기사는 제외한다.",
     },
+    "AGI": {   # 한국어 검색에서 'AGI'만 쓰면 무관한 기사(스포츠팀 등)가 섞여 AI 관련 단어를 함께 요구
+        "key": "AGI",
+        "ko_query": "AGI (AI OR 인공지능 OR 오픈AI OR 범용인공지능 OR 초지능)",
+    },
 }
 
 
@@ -181,8 +185,9 @@ def daily_update(kw: dict) -> dict:
             bullets = [str(b) for b in (r.get("bullets") or [])][:3]
             month = [str(b) for b in (r.get("month") or [])][:3]
             trend = str(r.get("trend") or "")
-        except Exception as e:
-            headline = f"(요약 실패: {type(e).__name__})"
+        except Exception as e:   # LLM 실패 시에도 기사 제목은 보여 준다
+            headline = f"_(요약 실패: {str(e)[:80] or type(e).__name__} → 주요 기사 제목만 표시)_"
+            bullets = [a["title"] for a in ((fo[:2] + ko[:1]) if c["focus"] else (ko[:2] + fo[:1]))]
     top = (fo[:2] + ko[:1]) if c["focus"] else (fo[:1] + ko[:2])
     links = [(a["source"], a["url"]) for a in top if a.get("url")]
     return dict(q=c["q"], key=q, label=c["label"], en=en, ko_query=c["ko_query"], sites=c["sites"],
@@ -217,8 +222,11 @@ def month_scan(c: dict) -> list[dict]:
 
 
 def _spark(vals: list[int]) -> str:
-    bars, m = "▁▂▃▄▅▆▇█", max(vals) or 1
-    return "".join(bars[min(7, int(v / m * 7))] for v in vals)
+    """최솟값~최댓값 범위로 그린다 (144·176·161·143처럼 비슷한 값도 차이가 보이게). 변동 10% 미만이면 평평하게."""
+    bars, lo, hi = "▁▂▃▄▅▆▇█", min(vals), max(vals)
+    if hi == 0 or (hi - lo) / hi < 0.1:
+        return "▄" * len(vals)
+    return "".join(bars[1 + round((v - lo) / (hi - lo) * 6)] for v in vals)
 
 
 def full_reason(r: dict, now: datetime) -> str | None:

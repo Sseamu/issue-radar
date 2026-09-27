@@ -30,29 +30,62 @@ WEEKDAY = "월화수목금토일"
 
 
 # ---------------------------------------------------------------- 수집
-def _raw_feeds() -> dict:
-    return json.loads(FEEDS_PATH.read_text(encoding="utf-8"))
+def feeds_path(profile: str | None = None) -> Path:
+    """profile 없음 = 기본 아침 브리핑(feeds.json), 'diplomacy' = feeds_diplomacy.json 처럼 별도 브리핑."""
+    return FEEDS_PATH if not profile or profile == "main" else config.ROOT / f"feeds_{profile}.json"
 
 
-def load_feeds(sections: list[str] | None = None) -> dict:
-    feeds = _raw_feeds()
+def profiles() -> list[str]:
+    """추가 브리핑 목록 (feeds_*.json 파일 이름)."""
+    return sorted(p.stem[len("feeds_"):] for p in config.ROOT.glob("feeds_*.json"))
+
+
+def _raw_feeds(profile: str | None = None) -> dict:
+    return json.loads(feeds_path(profile).read_text(encoding="utf-8"))
+
+
+def load_feeds(sections: list[str] | None = None, profile: str | None = None) -> dict:
+    feeds = _raw_feeds(profile)
     return {k: v for k, v in feeds.items() if not k.startswith("_") and (not sections or k in sections)}
+
+
+def profile_channel(profile: str | None) -> str:
+    """브리핑을 보낼 Slack 채널. 추가 브리핑은 _channel_env 에 적힌 .env 변수(예: SLACK_DIPLO_CHANNEL)."""
+    if not profile or profile == "main":
+        return config.SLACK_BRIEF_CHANNEL
+    env_name = _raw_feeds(profile).get("_channel_env", f"SLACK_{profile.upper()}_CHANNEL")
+    return config.env(env_name)
+
+
+def profile_for_channel(channel: str) -> str | None:
+    """이 채널로 설정된 추가 브리핑이 있으면 그 이름 (채널에서 '@radar 브리핑' 하면 그 브리핑을 준다)."""
+    for p in profiles():
+        try:
+            if channel and profile_channel(p) == channel:
+                return p
+        except Exception:
+            pass
+    return None
 
 
 DEFAULT_GROUPS = [{"name": "주요 뉴스", "sections": None, "n": 10, "min_foreign": 0, "boost": False}]
 
 
-def load_brief_config() -> dict:
+def load_brief_config(profile: str | None = None) -> dict:
     """feeds.json의 _groups / _boost_words / _exclude_* 설정. 없으면 전체 섹션에서 10개."""
-    raw = _raw_feeds()
-    groups = raw.get("_groups") or DEFAULT_GROUPS
-    all_secs = list(load_feeds().keys())
+    raw = _raw_feeds(profile)
+    groups = json.loads(json.dumps(raw.get("_groups") or DEFAULT_GROUPS))
+    all_secs = list(load_feeds(profile=profile).keys())
     for g in groups:
         g["sections"] = [x for x in (g.get("sections") or all_secs) if x in all_secs]
     return dict(groups=groups, boost_words=[w.lower() for w in raw.get("_boost_words", [])],
                 boost_factor=float(raw.get("_boost_factor", 1.4)),
                 exclude_sections=set(raw.get("_exclude_sections", [])),
-                exclude_words=[w.lower() for w in raw.get("_exclude_words", [])])
+                exclude_words=[w.lower() for w in raw.get("_exclude_words", [])],
+                title=raw.get("_title", "아침 브리핑"), editor=raw.get("_editor", ""), extra=raw.get("_extra"),
+                trusted=[t.lower() for t in raw.get("_trusted_outlets", [])], profile=profile,
+                require_words=[w.lower() for w in raw.get("_require_words", [])],
+                llm=raw.get("_llm"))
 
 
 def _google_cluster_size(desc_html: str) -> int:
@@ -110,15 +143,24 @@ def fetch_feed(feed: dict, section: str) -> list[dict]:
     return out
 
 
-def collect_all(sections: list[str] | None = None, hours: int = 24, now: datetime | None = None):
+def _trusted(outlet: str, trusted: list[str]) -> bool:
+    o = (outlet or "").lower()
+    return any(t == o or t in o for t in trusted)
+
+
+def collect_all(sections: list[str] | None = None, hours: int = 24, now: datetime | None = None,
+                profile: str | None = None, trusted: list[str] | None = None):
+    """trusted 가 있으면 구글 뉴스(여러 언론사 섞인) 피드는 신뢰 언론사 기사만 남긴다."""
     now = now or datetime.now(KST)
     since = now - timedelta(hours=hours)
-    jobs = [(f, s) for s, fl in load_feeds(sections).items() for f in fl]
+    jobs = [(f, s) for s, fl in load_feeds(sections, profile).items() for f in fl]
     items, status = [], {}
     with ThreadPoolExecutor(8) as ex:
         for (f, s), fut in zip(jobs, [ex.submit(fetch_feed, f, s) for f, s in jobs]):
             try:
                 got = fut.result()
+                if trusted and f.get("type") == "google":
+                    got = [i for i in got if _trusted(i["outlet"], trusted)]
                 status[f["name"]] = len(got)
                 items += [i for i in got if i["published"] is None or i["published"] >= since]
             except Exception as e:
@@ -259,8 +301,11 @@ SYS = ("너는 아침 뉴스 브리핑 에디터다. 주어진 기사 제목·�
        "영어 기사도 모두 자연스러운 한국어로 작성하라.")
 
 
-def summarize(events: list[dict]) -> dict:
+def summarize(events: list[dict], cfg: dict | None = None) -> dict:
     from .llm import chat_json
+    cfg = cfg or {}
+    extra = cfg.get("extra")
+    extra_field = f', "{extra["key"]}": "{extra["instruction"]}"' if extra else ""
     lines = [f"[id={e['id']}] ({e['section']}{', 영문' if e.get('lang') == 'en' else ''}) "
              + " | ".join(e["titles"][:3]) + (f"\n    요약문: {e['snippet'][:150]}" if e["snippet"] else "")
              for e in events]
@@ -268,12 +313,16 @@ def summarize(events: list[dict]) -> dict:
 {chr(10).join(lines)}
 
 각 id마다 항목을 하나씩, 입력 순서대로 작성하라. 다른 id의 내용을 섞지 마라.
-- 두 id가 명백히 같은 사건이면 뒤의 id에만 "duplicate_of": 앞 id 를 넣어라.
+- 두 id가 같은 사건이면(언어·그룹이 달라도, 예: 같은 회담의 안보 측면 기사와 관세 측면 기사) 뒤의 id에만 "duplicate_of": 앞 id 를 넣어라.
 - 개인·지역 단위 사건사고(화재, 교통사고, 추락, 범죄 피해, 실종 등)이면 "incident": true 로 표시하라.
 JSON: {{"mood": "어제 국내외 뉴스 전체 분위기 한 문장",
  "items": [{{"id": 숫자, "headline": "이 사건만 다룬 30자 이내 한국어 제목", "summary": "무슨 일이 있었나 1~2문장",
-            "why": "왜 중요한가 1문장", "duplicate_of": null, "incident": false}}]}}"""
-    return chat_json(SYS, user, max_tokens=4000, fast=True)
+            "why": "왜 중요한가 1문장"{extra_field}, "duplicate_of": null, "incident": false}}]}}"""
+    system = SYS + (" " + cfg["editor"] if cfg.get("editor") else "")
+    if cfg.get("llm"):   # 예: 외교 브리핑은 Claude(구독)로, 실패하면 로컬 모델
+        from .llm import chat_json_prefer
+        return chat_json_prefer(cfg["llm"], system, user, max_tokens=6000, fast=True)
+    return chat_json(system, user, max_tokens=5000 if extra else 4000, fast=True)
 
 
 def _as_int(x):
@@ -284,15 +333,20 @@ def _as_int(x):
 
 
 def build_brief(sections: list[str] | None = None, hours: int = 24, top_n: int | None = None,
-                use_llm: bool = True, enrich: bool = True, now: datetime | None = None) -> dict:
-    """sections 인자는 하위 호환용. 그룹 구성은 feeds.json의 _groups가 결정한다."""
-    cfg = load_brief_config()
+                use_llm: bool = True, enrich: bool = True, now: datetime | None = None,
+                profile: str | None = None) -> dict:
+    """sections 인자는 하위 호환용. 그룹 구성은 feeds.json(또는 feeds_<profile>.json)의 _groups가 결정한다."""
+    cfg = load_brief_config(profile)
     groups = cfg["groups"]
     all_secs = list(dict.fromkeys(s for g in groups for s in g["sections"]))
-    items, status = collect_all(all_secs, hours, now)
+    items, status = collect_all(all_secs, hours, now, profile, cfg["trusted"])
     events = cluster_events(items)
     excluded = [e for e in events if is_incident(e, cfg)]
     events = [e for e in events if not is_incident(e, cfg)]
+    off = []
+    if cfg["require_words"]:   # 주제 브리핑(외교 등): 핵심 단어가 하나도 없는 사건은 주제 밖으로 보고 뺀다
+        off = [e for e in events if not _has(_text(e), cfg["require_words"])]
+        events = [e for e in events if e not in off]
 
     pools, cands_all = [], []
     for g in groups:
@@ -306,18 +360,19 @@ def build_brief(sections: list[str] | None = None, hours: int = 24, top_n: int |
         score_events(cands, cfg, bool(g.get("boost")))
     shortlist = [pick_group(c, g["n"] + 3, g.get("min_foreign", 0)) for g, c in zip(groups, pools)]
 
-    out = dict(date=(now or datetime.now(KST)), n_items=len(items), n_events=len(events) + len(excluded),
-               n_excluded=len(excluded), feeds=status, mood="", groups=[], items=[])
+    out = dict(trusted=bool(cfg["trusted"]), date=(now or datetime.now(KST)), title=cfg["title"], extra=cfg["extra"], n_items=len(items), n_events=len(events) + len(excluded) + len(off),
+               n_excluded=len(excluded), n_offtopic=len(off), feeds=status, mood="", groups=[], items=[])
     written = {}
     todo = [e for sl in shortlist for e in sl]
     if use_llm and todo:
         try:
-            res = summarize(todo)
+            res = summarize(todo, cfg)
             out["mood"] = _s(res.get("mood"))
             written = {_as_int(it.get("id")): it for it in res.get("items", []) if _as_int(it.get("id")) is not None}
         except Exception as e:
-            out["mood"] = f"(LLM 요약 실패: {type(e).__name__}. 제목만 표시합니다)"
+            out["mood"] = f"(LLM 요약 실패: {str(e)[:120] or type(e).__name__}. 제목만 표시합니다)"
 
+    chosen_all = {}   # 앞 그룹에서 이미 뽑힌 사건 (그룹을 넘나드는 중복 제거용)
     for g, sl in zip(groups, shortlist):
         by_id = {e["id"]: e for e in sl}
         kept = []
@@ -327,17 +382,24 @@ def build_brief(sections: list[str] | None = None, hours: int = 24, top_n: int |
                 out["n_excluded"] += 1
                 continue
             dup = _as_int(w.get("duplicate_of"))
-            if dup in by_id and dup != e["id"] and by_id[dup] in kept:   # 같은 사건 → 앞 항목에 합침
-                tgt = by_id[dup]
+            tgt = None
+            if dup is not None and dup != e["id"]:
+                if dup in by_id and by_id[dup] in kept:
+                    tgt = by_id[dup]
+                elif dup in chosen_all:
+                    tgt = chosen_all[dup]
+            if tgt is not None:   # 같은 사건 → 앞 항목에 합침
                 tgt["coverage"] = max(tgt["coverage"], e["coverage"])
                 tgt["links"] = list({u: (o, u) for o, u in tgt["links"] + e["links"]}.values())[:3]
                 continue
             e["_w"] = w
             kept.append(e)
         final = pick_group(kept, g["n"], g.get("min_foreign", 0))
+        chosen_all.update({e["id"]: e for e in final})
         rows = [dict(section=e["section"], foreign=e.get("lang") == "en", boosted=e.get("boosted", False),
                      headline=_s(e["_w"].get("headline")) or e["titles"][0],
                      summary=_s(e["_w"].get("summary")) or e["snippet"], why=_s(e["_w"].get("why")),
+                     extra=_s(e["_w"].get(cfg["extra"]["key"])) if cfg["extra"] else "",
                      coverage=e["coverage"], links=e["links"]) for e in final]
         out["groups"].append(dict(name=g["name"], items=rows))
         out["items"] += rows
@@ -353,7 +415,7 @@ def _s(x) -> str:
 # ---------------------------------------------------------------- Slack 포맷
 def to_blocks(b: dict) -> tuple[list[dict], str]:
     d = b["date"]
-    title = f"{d.month}월 {d.day}일({WEEKDAY[d.weekday()]}) 아침 브리핑 · 지난 24시간"
+    title = f"{d.month}월 {d.day}일({WEEKDAY[d.weekday()]}) {b.get('title') or '아침 브리핑'} · 지난 24시간"
     blocks = [{"type": "header", "text": {"type": "plain_text", "text": title}}]
     if b.get("mood"):
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_{b['mood']}_"}})
@@ -370,13 +432,17 @@ def to_blocks(b: dict) -> tuple[list[dict], str]:
             txt = f"*{no}. {it['headline']}*   {tags}\n{it['summary']}"
             if it.get("why"):
                 txt += f"\n> {it['why']}"
+            if it.get("extra") and b.get("extra"):
+                txt += f"\n{b['extra']['label']}: {it['extra']}"
             if links:
                 txt += f"\n{links}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": txt[:2900]}})
     ok = sum(isinstance(v, int) and v > 0 for v in b["feeds"].values())
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text":
-                   f"기사 {b['n_items']}건 → 사건 {b['n_events']}개 (사건사고 {b.get('n_excluded', 0)}건 제외) · "
-                   f"피드 {ok}/{len(b['feeds'])} 정상 · 순위 = 보도 매체 수(국내·해외 각각) + 관심 키워드 가중치"}]})
+                   f"기사 {b['n_items']}건 → 사건 {b['n_events']}개 (사건사고 {b.get('n_excluded', 0)}건"
+                   + (f" · 주제 밖 {b['n_offtopic']}건" if b.get("n_offtopic") else "") + " 제외) · "
+                   f"피드 {ok}/{len(b['feeds'])} 정상 · 순위 = 보도 매체 수(국내·해외 각각) + 관심 키워드 가중치"
+                   + (" · 구글 뉴스는 신뢰 언론사만" if b.get("trusted") else "")}]})
     return blocks, title
 
 
@@ -388,20 +454,31 @@ def main():
     ap.add_argument("--no-enrich", action="store_true", help="구글 검색으로 매체 수 보강 생략")
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--sections", default=config.env("BRIEF_SECTIONS"), help="쉼표 구분, 비우면 전체")
+    ap.add_argument("--profile", default=None, help="추가 브리핑 이름 (예: diplomacy → feeds_diplomacy.json)")
     a = ap.parse_args()
+    if a.profile:
+        a.sections = ""
     sections = [s.strip() for s in a.sections.split(",") if s.strip()] or None
 
     if a.check_feeds:
-        _, status = collect_all(None, hours=24 * 365)   # 모든 섹션 점검
+        _, status = collect_all(None, hours=24 * 365, profile=a.profile)   # 모든 섹션 점검
         for k, v in status.items():
             print(f"{'OK ' if isinstance(v, int) and v else 'ERR'} {v!s:>12}  {k}")
         return
-    b = build_brief(sections, a.hours, use_llm=not a.no_llm, enrich=not a.no_enrich)
+    b = build_brief(sections, a.hours, use_llm=not a.no_llm, enrich=not a.no_enrich, profile=a.profile)
     blocks, title = to_blocks(b)
     if a.post:
         from .slack_out import post
-        post(blocks, title, channel=config.SLACK_BRIEF_CHANNEL)
+        ch = profile_channel(a.profile)
+        if not ch:
+            raise SystemExit(f"{a.profile} 브리핑 채널이 .env 에 없습니다")
+        res = post(blocks, title, channel=ch)
         print("Slack 전송 완료:", title)
+        if a.profile:
+            from . import opinion
+            from .slack_out import client
+            if opinion.post(client(), a.profile, ch, thread_ts=res["ts"]):
+                print("오늘의 논점 → 스레드 전송 완료")
     else:
         print(title, "\n", b.get("mood", ""))
         i = 0

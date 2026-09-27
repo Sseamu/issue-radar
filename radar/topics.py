@@ -73,8 +73,21 @@ def _st_model():
     if _ST is None:
         from sentence_transformers import SentenceTransformer
         import torch
-        _ST = SentenceTransformer(config.EMBED_MODEL, device="cuda" if torch.cuda.is_available() else "cpu")
+        cuda = torch.cuda.is_available()
+        _ST = SentenceTransformer(config.EMBED_MODEL, device="cuda" if cuda else "cpu")
+        if cuda:
+            _ST.half()   # GPU 메모리 절반(약 2.2GB → 1.1GB): 같은 GPU를 쓰는 Ollama와 충돌 줄임
     return _ST
+
+
+def _free_gpu():
+    """임베딩 후 PyTorch가 잡아 둔 여유 GPU 메모리를 돌려준다 (다음 Ollama 호출이 쓸 수 있게)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def embed(texts: list[str]) -> np.ndarray:
@@ -82,7 +95,11 @@ def embed(texts: list[str]) -> np.ndarray:
         if config.EMBED_BACKEND == "tfidf":
             raise RuntimeError("EMBED_BACKEND=tfidf")
         model = _st_model()
-        return model.encode(texts, batch_size=64, normalize_embeddings=True, show_progress_bar=False)
+        try:
+            return np.asarray(model.encode(texts, batch_size=32, normalize_embeddings=True, show_progress_bar=False),
+                              dtype=np.float32)
+        finally:
+            _free_gpu()
     except Exception as ex:  # 모델/torch 미설치 시 TF-IDF+SVD로 대체 (품질 ↓, 동작은 함)
         if config.EMBED_BACKEND != "tfidf":
             print(f"[embed] sentence-transformers 사용 불가 → TF-IDF 대체: {ex}")
