@@ -65,6 +65,22 @@ class OllamaError(RuntimeError):
     pass
 
 
+_RECOVERED = False
+
+
+def _recover_ollama():
+    """모델이 보이는 Ollama 서버를 찾아 연결 (아침 배치와 같은 방법: 모델 폴더 자동 탐색 + 보조 포트)."""
+    global _RECOVERED
+    _RECOVERED = True
+    try:
+        import atexit
+        from .morning import ensure_ollama, stop_own_ollama
+        ensure_ollama(timeout=120)
+        atexit.register(stop_own_ollama)   # 수동 실행이 끝나면 직접 띄운 보조 서버 정리
+    except Exception as e:
+        print(f"[ollama] 자동 복구 실패: {e}")
+
+
 def _ollama(system: str, user: str, temperature: float, max_tokens: int) -> str:
     """Ollama 호출. 500(대개 GPU 메모리 부족·모델 로딩 중 러너 종료)이나 연결 끊김이면
     잠시 쉬었다 재시도하고, 두 번째부터는 컨텍스트를 줄여(메모리 ↓) 다시 부른다."""
@@ -75,6 +91,7 @@ def _ollama(system: str, user: str, temperature: float, max_tokens: int) -> str:
         if wait:
             time.sleep(wait)
         ctx = OLLAMA_CTX[min(i, len(OLLAMA_CTX) - 1)]
+        url_before = config.OLLAMA_URL
         try:
             r = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=600, json=dict(
                 model=config.OLLAMA_MODEL, stream=False, format="json", think=False, keep_alive="30m",
@@ -91,8 +108,18 @@ def _ollama(system: str, user: str, temperature: float, max_tokens: int) -> str:
             detail = r.text[:200]
         last = f"HTTP {r.status_code}: {detail}"
         print(f"[ollama] {last} (시도 {i + 1}/{len(waits)}, num_ctx={ctx})")
+        if r.status_code == 404 and not _RECOVERED:
+            # 떠 있는 서버가 다른 모델 폴더를 보고 있는 경우: 모델이 보이는 서버를 확보한 뒤 한 번 더
+            _recover_ollama()
+            if config.OLLAMA_URL != url_before:
+                r2 = requests.post(f"{config.OLLAMA_URL}/api/chat", timeout=600, json=dict(
+                    model=config.OLLAMA_MODEL, stream=False, format="json", think=False, keep_alive="30m",
+                    options=dict(temperature=temperature, num_ctx=ctx, num_predict=max_tokens),
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}]))
+                if r2.ok:
+                    return r2.json()["message"]["content"]
         if r.status_code == 404:
-            last += " → 이 Ollama 서버에 모델이 없음 (PowerShell에서 `ollama list` 확인, 모델 저장 위치가 다르면 .env 에 OLLAMA_MODELS)"
+            last += " → 이 Ollama 서버에 모델이 없음 (모델 폴더 위치 확인 필요)"
         if r.status_code < 500:
             break
     raise OllamaError(last)

@@ -79,43 +79,84 @@ def stop_own_ollama():
     _OLLAMA_PROC = None
 
 
+def find_models_dir(model: str | None = None) -> str | None:
+    """모델 파일(manifest)이 실제로 있는 폴더를 찾는다.
+    Ollama 앱 설정·사용자 환경변수·.env 가 서로 다른 위치를 가리킬 수 있어서, 후보를 모두 확인한다."""
+    name, _, tag = (model or config.OLLAMA_MODEL).partition(":")
+    cands = [config.env("OLLAMA_MODELS"), os.environ.get("OLLAMA_MODELS"),
+             os.path.expandvars(r"%USERPROFILE%\.ollama\models"), os.path.expanduser("~/.ollama/models"),
+             r"C:\ollama\models", r"D:\ollama\models"]
+    seen = []
+    for c in cands:
+        if not c or c in seen:
+            continue
+        seen.append(c)
+        if (Path(c) / "manifests" / "registry.ollama.ai" / "library" / name / (tag or "latest")).exists():
+            return c
+    log.warning("모델 %s 파일을 찾지 못함. 확인한 위치: %s", model or config.OLLAMA_MODEL, seen)
+    return None
+
+
+def _has_model(url: str) -> bool | None:
+    try:
+        names = [m["name"] for m in requests.get(f"{url}/api/tags", timeout=5).json().get("models", [])]
+    except Exception:
+        return None
+    want = config.OLLAMA_MODEL
+    ok = any(n == want or n == want + ":latest" for n in names)
+    if not ok:
+        log.warning("%s 의 Ollama에 %s 없음. 보이는 모델: %s", url, want, names or "없음")
+    return ok
+
+
+def _alive(url: str) -> bool:
+    try:
+        return requests.get(f"{url}/api/tags", timeout=3).ok
+    except Exception:
+        return False
+
+
+def _start_serve(host: str, models_dir: str | None, timeout: int) -> bool:
+    exe = os.path.expandvars(config.env("OLLAMA_EXE", r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"))
+    exe = exe if Path(exe).exists() else "ollama"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = host
+    if models_dir:
+        env["OLLAMA_MODELS"] = models_dir
+    log.info("Ollama 시작: %s serve (주소 %s, 모델 위치 %s)", exe, host, models_dir or "기본값")
+    olog = open(config.ROOT / "data" / "ollama.log", "ab")   # 서버 로그 (오류 원인 확인용)
+    global _OLLAMA_PROC
+    _OLLAMA_PROC = subprocess.Popen([exe, "serve"], creationflags=flags, stdout=olog, stderr=olog, env=env)
+    url, end = f"http://{host}", time.time() + timeout
+    while not _alive(url):
+        if time.time() > end or _OLLAMA_PROC.poll() is not None:
+            return False
+        time.sleep(3)
+    return True
+
+
 def ensure_ollama(timeout: int = 180) -> bool:
-    """로그인 없이 부팅된 상태라 Ollama 앱이 안 떠 있을 수 있다 → 직접 serve 실행 후 모델 예열."""
+    """쓸 수 있는 Ollama(모델이 보이는 서버)를 확보한다.
+    1) 이미 떠 있고 모델이 보이면 그대로 사용
+    2) 안 떠 있으면 모델 위치를 찾아 직접 serve
+    3) 떠 있는데 모델이 안 보이면(다른 위치를 보는 서버) 옆 포트(11435)에 제대로 된 서버를 따로 띄워 그쪽을 쓴다"""
     if config.LLM_PROVIDER != "ollama":
         return True
     url = config.OLLAMA_URL
-
-    def alive():
-        try:
-            return requests.get(f"{url}/api/tags", timeout=3).ok
-        except Exception:
+    if _alive(url):
+        if _has_model(url) is False:
+            alt = config.env("OLLAMA_ALT_HOST", "127.0.0.1:11435")
+            if _start_serve(alt, find_models_dir(), timeout) and _has_model(f"http://{alt}"):
+                config.OLLAMA_URL = url = f"http://{alt}"
+                log.info("모델이 보이는 보조 Ollama 서버 사용: %s", url)
+            else:
+                log.error("모델 %s 를 쓸 수 있는 Ollama 서버를 확보하지 못함", config.OLLAMA_MODEL)
+    else:
+        host = url.split("://", 1)[-1]
+        if not _start_serve(host, find_models_dir(), timeout):
             return False
-
-    if not alive():
-        exe = os.path.expandvars(config.env("OLLAMA_EXE", r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"))
-        exe = exe if Path(exe).exists() else "ollama"
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        log.info("Ollama 시작: %s serve", exe)
-        # Ollama 서버 로그를 data/ollama.log 에 남긴다 (500 오류 등 원인 확인용)
-        olog = open(config.ROOT / "data" / "ollama.log", "ab")
-        env = os.environ.copy()
-        if config.env("OLLAMA_MODELS"):   # Ollama 앱 설정에서 모델 저장 위치를 바꿨다면 같은 위치를 알려 줘야 함
-            env["OLLAMA_MODELS"] = config.env("OLLAMA_MODELS")
-        global _OLLAMA_PROC
-        _OLLAMA_PROC = subprocess.Popen([exe, "serve"], creationflags=flags, stdout=olog, stderr=olog, env=env)
-        end = time.time() + timeout
-        while not alive():
-            if time.time() > end:
-                return False
-            time.sleep(3)
-    try:  # 모델이 이 Ollama에 실제로 있는지 확인 (없으면 404 → 요약 전부 실패)
-        names = [m["name"] for m in requests.get(f"{url}/api/tags", timeout=5).json().get("models", [])]
-        want = config.OLLAMA_MODEL
-        if not any(n == want or n == want + ":latest" for n in names):
-            log.error("Ollama에 모델 %s 이 없습니다. 보이는 모델: %s (모델 저장 위치가 다르면 .env 에 OLLAMA_MODELS 지정)",
-                      want, names or "없음")
-    except Exception as e:
-        log.warning("모델 목록 확인 실패: %s", e)
+        _has_model(url)
     for attempt in range(3):  # 모델을 GPU에 미리 올려 둠 (첫 호출 지연 제거). 부팅 직후엔 실패할 수 있어 재시도
         try:
             r = requests.post(f"{url}/api/generate", json={"model": config.OLLAMA_MODEL, "prompt": "",
